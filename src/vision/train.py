@@ -8,6 +8,8 @@ import torch.nn as nn
 from torch.utils.data import DataLoader
 from tqdm import tqdm
 
+import mlflow
+
 from .utils import get_device, save_checkpoint
 
 
@@ -61,8 +63,9 @@ def train(
     lr: float = 1e-4,
     checkpoint_dir: str | Path = "checkpoints",
     device_backend: Optional[str] = None,
+    experiment_name: str = "plankton-vision",
 ) -> nn.Module:
-    """Train *model* and save the best checkpoint based on validation accuracy.
+    """Train *model*, log to MLflow, and save the best checkpoint.
 
     Args:
         model: The model to train.
@@ -73,6 +76,7 @@ def train(
         checkpoint_dir: Directory where ``best.pt`` is saved.
         device_backend: Explicit device string (``"cuda"``, ``"mps"``, ``"cpu"``).
                         Defaults to CUDA when available, otherwise CPU.
+        experiment_name: MLflow experiment name.
 
     Returns:
         The trained model (still on *device*).
@@ -87,22 +91,48 @@ def train(
     criterion = nn.CrossEntropyLoss()
     scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=epochs)
 
-    best_val_acc = -1.0
-    for epoch in range(1, epochs + 1):
-        train_loss, train_acc = _train_one_epoch(
-            model, train_loader, optimizer, criterion, device
-        )
-        val_loss, val_acc = _evaluate(model, val_loader, criterion, device)
-        scheduler.step()
+    mlflow.set_experiment(experiment_name)
 
-        print(
-            f"Epoch {epoch}/{epochs} | "
-            f"train_loss={train_loss:.4f}  train_acc={train_acc:.4f} | "
-            f"val_loss={val_loss:.4f}  val_acc={val_acc:.4f}"
+    with mlflow.start_run():
+        mlflow.log_params(
+            {
+                "epochs": epochs,
+                "lr": lr,
+                "device": str(device),
+                "model_class": model.__class__.__name__,
+            }
         )
 
-        if val_acc > best_val_acc:
-            best_val_acc = val_acc
-            save_checkpoint(model, optimizer, epoch, checkpoint_dir / "best.pt")
+        best_val_acc = -1.0
+        for epoch in range(1, epochs + 1):
+            train_loss, train_acc = _train_one_epoch(
+                model, train_loader, optimizer, criterion, device
+            )
+            val_loss, val_acc = _evaluate(model, val_loader, criterion, device)
+            scheduler.step()
+
+            print(
+                f"Epoch {epoch}/{epochs} | "
+                f"train_loss={train_loss:.4f}  train_acc={train_acc:.4f} | "
+                f"val_loss={val_loss:.4f}  val_acc={val_acc:.4f}"
+            )
+
+            mlflow.log_metrics(
+                {
+                    "train_loss": train_loss,
+                    "train_acc": train_acc,
+                    "val_loss": val_loss,
+                    "val_acc": val_acc,
+                },
+                step=epoch,
+            )
+
+            if val_acc > best_val_acc:
+                best_val_acc = val_acc
+                ckpt_path = checkpoint_dir / "best.pt"
+                save_checkpoint(model, optimizer, epoch, ckpt_path)
+                mlflow.log_artifact(str(ckpt_path), artifact_path="checkpoints")
+
+        mlflow.log_metric("best_val_acc", best_val_acc)
 
     return model
