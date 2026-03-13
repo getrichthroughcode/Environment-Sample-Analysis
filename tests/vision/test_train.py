@@ -1,8 +1,10 @@
 from pathlib import Path
+from unittest.mock import MagicMock, patch
 
 import pytest
 import torch
 from PIL import Image
+from torch.utils.data import DataLoader, Subset
 
 from src.vision.dataset import VAL_TRANSFORMS, PlanktonDataset, _TransformSubset
 from src.vision.model import build_model
@@ -19,8 +21,6 @@ def tiny_loaders(tmp_path: Path):
             img = Image.new("RGB", (64, 64))
             img.save(cls_dir / f"img_{i}.jpg")
 
-    from torch.utils.data import DataLoader, Subset
-
     ds = PlanktonDataset(tmp_path)
     train_ds = _TransformSubset(Subset(ds, [0, 1]), VAL_TRANSFORMS)
     val_ds = _TransformSubset(Subset(ds, [2, 3]), VAL_TRANSFORMS)
@@ -32,16 +32,30 @@ def tiny_loaders(tmp_path: Path):
 def test_train_smoke(tiny_loaders, tmp_path):
     train_loader, val_loader = tiny_loaders
     model = build_model(num_classes=2, pretrained=False)
-    trained = train(
-        model,
-        train_loader,
-        val_loader,
-        epochs=1,
-        checkpoint_dir=tmp_path / "ckpt",
-        device_backend="cpu",
-    )
+
+    mock_run = MagicMock()
+    mock_run.__enter__ = MagicMock(return_value=mock_run)
+    mock_run.__exit__ = MagicMock(return_value=False)
+
+    with patch("src.vision.train.mlflow") as mock_mlflow:
+        mock_mlflow.start_run.return_value = mock_run
+
+        trained = train(
+            model,
+            train_loader,
+            val_loader,
+            epochs=1,
+            checkpoint_dir=tmp_path / "ckpt",
+            device_backend="cpu",
+        )
+
     assert (tmp_path / "ckpt" / "best.pt").exists()
     dummy = torch.zeros(1, 3, 224, 224)
     with torch.no_grad():
         out = trained(dummy)
     assert out.shape == (1, 2)
+
+    mock_mlflow.set_experiment.assert_called_once_with("plankton-vision")
+    mock_mlflow.log_params.assert_called_once()
+    assert mock_mlflow.log_metrics.call_count == 1
+    mock_mlflow.log_metric.assert_called_once()
